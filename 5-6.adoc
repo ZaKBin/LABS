@@ -29,8 +29,6 @@ include::Titul1.adoc[]
 
 [plantuml]
 ----
-@startuml
-
 interface IModeManager {
   + Init()
   + Update()
@@ -38,7 +36,7 @@ interface IModeManager {
 }
 
 interface IButton {
-  + onClick(): bool
+  + IsPressed(): bool
 }
 
 class ModeManager {
@@ -52,7 +50,7 @@ class ModeManager {
 class Button<TPort, pinNumber> {
   - bool currentStatus
   - std::uint32_t buttonPortStatus
-  + onClick(): bool
+  + IsPressed(): bool
 }
 
 class ModeConfig {
@@ -69,7 +67,7 @@ IButton <|-- Button
 
 Поле currentStatus используется для хранения текущего состояния кнопки, указывая, нажата она или отпущена. Это позволяет отслеживать изменения состояния между последовательными вызовами. Поле buttonPortStatus хранит состояние порта, связанного с кнопкой, что необходимо для анализа сигнала с пина микроконтроллера.
 
-Метод onClick() реализует основную функцию класса. Он проверяет, нажата ли кнопка, анализируя состояние порта, связанного с заданным пином. Если кнопка нажата, метод возвращает true, иначе — false. Этот метод делает класс удобным для обработки событий нажатия кнопки в программной логике микроконтроллера.
+Метод IsPressed() реализует основную функцию класса. Он проверяет, нажата ли кнопка, анализируя состояние порта, связанного с заданным пином. Если кнопка нажата, метод возвращает true, иначе — false. Этот метод делает класс удобным для обработки событий нажатия кнопки в программной логике микроконтроллера.
 
 Код IModeManager
 
@@ -140,22 +138,16 @@ ModeManager::ModeManager(tMode& modeArr) : modes(modeArr), currentModeType(0)
 }
 
 void ModeManager::InitModeManager() {
-    if (modes[currentModeType]) {
         modes[currentModeType]->Init();
-    }
 }
 
 void ModeManager::UpdateModeManager() {
-    if (modes[currentModeType]) {
         modes[currentModeType]->Update();
-    }
 }
 
 void ModeManager::SwitchModeManager() {
-    currentModeType = (currentModeType + 1) % 3; 
-    if (modes[currentModeType]) {
+    currentModeType = (currentModeType + 1) % sizeof(modes); 
         modes[currentModeType]->Init();
-    }
 }
 ----
 
@@ -176,7 +168,7 @@ void ModeManager::SwitchModeManager() {
 
 class IButton {
 public:
-    virtual bool onClick() = 0;
+    virtual bool IsPressed() = 0;
 };
 #endif
 ----
@@ -189,14 +181,14 @@ public:
 #define BUTTON_H
 #include "IButton.h"
 
-template<typename Tport, int punNumber>
+template<typename TPort, int pinNumber>
 class Button : public IButton {
 public:
       bool onClick() override
       {
-         return (Tport::IDR::Get() & (1 << punNumber)) == 0;
+         return (TPort::IDR::Get() & (1 << pinNumber)) == 0;
       }
-      
+   // Текущее состояние кнопки: true, если кнопка нажата, и false, если отпущена.     
 private:
   bool currentStatus;
   std::uint32_t buttonPortStatus;
@@ -204,7 +196,7 @@ private:
 #endif
 ----
 
-Шаблонные параметры Tport и punNumber позволяют настроить класс Button для работы с определёнными портами и пинами. Метод Get() из Tport::IDR используется, чтобы узнать состояние порта и проверить, есть ли сигнал на выбранном пине.
+Шаблонные параметры TPort и pinNumber позволяют настроить класс Button для работы с определёнными портами и пинами. Метод Get() из Tport::IDR используется, чтобы узнать состояние порта и проверить, есть ли сигнал на выбранном пине.
 
 === Итог работы с классами
 
@@ -233,13 +225,12 @@ std::uint32_t SystemCoreClock = 16'000'000U;
 extern "C" 
 int __low_level_init(void)
 
-  //Switch on external 16 MHz oscillator
+ 
   RCC::CR::HSION::On::Set();
   while (RCC::CR::HSIRDY::NotReady::IsSet())
   {
 
   }
-  //Switch system clock on external oscillator
   RCC::CFGR::SW::Hsi::Set();
   while (!RCC::CFGR::SWS::Hsi::IsSet())
   {
@@ -261,14 +252,11 @@ std::uint32_t SystemCoreClock = 8'000'000U;
 
 extern "C" 
 int __low_level_init(void)
-
-  //Switch on external 8 MHz oscillator
   RCC::CR::HSEON::On::Set();
   while (RCC::CR::HSERDY::NotReady::IsSet())
   {
 
   }
-  //Switch system clock on external oscillator
   RCC::CFGR::SW::Hse::Set();
   while (!RCC::CFGR::SWS::Hse::IsSet())
   {
@@ -287,6 +275,8 @@ int __low_level_init(void)
 Здесь SysTick (системный таймер) настраивается на использование тактового сигнала процессора. Это позволяет создавать интервалы времени и использовать таймерные функции.
 
 Включается тактирование блока SYSCFG, который отвечает за работу системных функций, таких как GPIO, настройка прерываний и другие системные конфигурации. Это необходимо для доступа к дополнительным функциям микроконтроллера.
+
+SysTick — это встроенный таймер в микроконтроллерах на базе ARM Cortex-M. Его используют для создания задержек, периодических событий или работы с операционными системами.
 
 === Задание на PLL
 
@@ -310,33 +300,36 @@ f = 13.666МГц, например, выберем: PLLM = 8; PLLN = 137; PLLP =
 std::uint32_t SystemCoreClock = 13'666'000U;
 
 extern "C" 
-int __low_level_init(void) {
+int __low_level_init(void){
+  
+  RCC::CR::HSEON::On::Set();
 
-    RCC::CR::HSEON::On::Set();
-    while (!RCC::CR::HSERDY::Ready::IsSet()) {
-   
-    }
+  RCC::PLLCFGR::PLLSRC::HseSource::Set();
 
-    RCC::PLLCFGR::PLLSRC::HseSource::Set();
-    // 137
+    //137
     RCC::PLLCFGR::PLLN0::Set(0b10001001);
-    // 8
+   
+
+    //8
     RCC::PLLCFGR::PLLP0::Set(0b11);
   
-    // 8
-    RCC::PLLCFGR::PLLM0::Set(0b001000);
 
-    RCC::CR::HSION::Off::Set();
+    //10
+    RCC::PLLCFGR::PLLM0::Set(0b001011);
+    
 
+   
     RCC::CR::PLLON::On::Set();
     while (RCC::CR::PLLRDY::Unclocked::IsSet()) {
+        
     }
 
     RCC::CFGR::SW::Pll::Set();
     while (!RCC::CFGR::SWS::Pll::IsSet()) {
+      
+    }
 
-     }
-
+   
     RCC::APB2ENR::SYSCFGEN::Enable::Set();
 
     return 1;
