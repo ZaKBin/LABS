@@ -1,0 +1,224 @@
+= Лабораторная работа №9
+Волбенко В.Д. <КЭ-413>
+:description: Лабораторная работа №9
+:toc:
+:toc-title: Оглавление
+:imagesdir: Pic
+:figure-caption: Рисунок
+:table-caption: Таблица
+
+include::Titul9.adoc[]
+
+== Как работают NVIC и EXTI в STM32F411
+ 
+=== NVIC
+
+В микроконтроллерах STM32F4, построенных на ядре Cortex-M4, за обработку прерываний отвечает модуль NVIC (Nested Vectored Interrupt Controller). Это встроенный в ядро контроллер, который управляет множеством линий прерываний — в STM32F411 их около 82. Каждая линия, называемая IRQ (Interrupt Request), привязана к какому-то устройству, например, таймеру, UART или линиям EXTI. NVIC умеет обрабатывать прерывания с разными приоритетами, что позволяет гибко управлять их очередностью.
+
+Приоритеты задаются числами от 0 до 15 (0 — самый высокий), и NVIC поддерживает вложение: если приходит прерывание с более высоким приоритетом, оно может прервать текущее. Это особенно полезно в системах реального времени. Ещё одна крутая фича — tail-chaining: если два прерывания приходят почти одновременно, NVIC сразу переключается на следующее, не возвращаясь к основному коду, что экономит время.
+
+=== EXTI
+
+EXTI (External Interrupt/Event Controller) — это периферия, которая следит за изменениями сигналов на пинах GPIO и отправляет запросы прерываний в NVIC. В STM32F4 есть 16 линий EXTI (от 0 до 15), и каждая может быть подключена к пину с таким же номером из любого порта (например, EXTI13 к PA13, PB13, PC13). Настройка подключения делается через регистр SYSCFG.
+
+Когда сигнал на пине меняется (например, кнопка на PC13 нажата), EXTI фиксирует это событие, если настроен на нужный фронт (нарастающий или спадающий), и ставит флаг pending. Если прерывание не замаскировано, сигнал уходит в NVIC по определённому каналу IRQ. Дальше NVIC решает, прерывать ли текущую задачу, основываясь на приоритете, и переходит к обработчику, адрес которого берёт из таблицы векторов.
+
+Интересно, что не все линии EXTI имеют свои IRQ: линии 0–4 — индивидуальные, а 5–9 и 10–15 сгруппированы в общие каналы (EXTI9_5_IRQn и EXTI15_10_IRQn). Например, EXTI13 попадает в EXTI15_10, и если несколько линий из этой группы сработают, один обработчик должен разбираться, кто из них виноват.
+
+== Структура проекта: классы и их взаимодействие
+
+Мы использовали объектно-ориентированный подход с шаблонами, чтобы сделать код модульным и переиспользуемым. Вот основные классы:
+
+* ButtonExti — шаблонный класс для обработки прерываний от кнопки. Он реагирует на сигнал EXTI и вызывает метод переключения режима.
+* ModeManager — сердце проекта, управляет режимами работы (например, AllMode, ChessMode, TreeMode). Умеет переключать режимы и обновлять их состояние.
+* Timer — шаблонный класс, связанный с таймером (в моём случае TIM5). Генерирует периодические прерывания для обновления состояния.
+
+ModeManager связывает всё воедино: кнопка через SwitchModeManager меняет режим, а таймер через UpdateModeManager обновляет его. Такой подход мне показался удобным, потому что логика сосредоточена в одном месте, а классы можно легко адаптировать под другие задачи.
+
+== Настройка EXTI13 для кнопки на PC13
+
+Чтобы кнопка на PC13 работала через EXTI13, выполнили следующие шаги. Вот код:
+
+[source,cpp]
+----
+RCC::AHB1ENR::GPIOCEN::Enable::Set();
+GPIOC::MODER::MODER13::Input::Set();
+RCC::APB2ENR::SYSCFGEN::Enable::Set();
+SYSCFG::EXTICR4::EXTI13::Value2::Set();
+EXTI::FTSR::TR13::Value1::Set();
+EXTI::RTSR::TR13::Value0::Set();
+EXTI::PR::PR13::Value1::Set();
+EXTI::IMR::MR13::Value1::Set();
+NVIC::ISER1::Write(1 << 8U);
+----
+
+== Обработчик прерывания кнопки
+
+Обработчик поместили в класс ButtonExti. Он срабатывает по вектору EXTI15_10_IRQn (так как EXTI13 в этой группе). Вот код:
+
+[source,cpp]
+----
+template<auto &modeManager>
+class ButtonExti {
+public:
+    static void HandleClick() {
+        if (EXTI::PR::PR13::Value1::IsSet()) {
+            modeManager.SwitchModeManager();
+            EXTI::PR::PR13::Value1::Set();
+        }
+    }
+};
+----
+
+Проверка флага важна, потому что EXTI15_10 обслуживает линии 10–15, и без неё можно случайно обработать чужое событие. После переключения режима сразу сбрасываем флаг, чтобы NVIC не вызвал обработчик заново.
+
+== Настройка таймера TIM5
+
+Для периодического обновления (например, мигания светодиодов) настроили TIM5 на прерывание каждые 500 мс.
+
+[source,cpp]
+----
+TIM5::PSC::Write(SystemCoreClock / 1000U);
+TIM5::ARR::Write(500U);
+TIM5::DIER::UIE::Value1::Set();
+TIM5::CR1::CEN::Enable::Set();
+----
+
+== Таблица прерываний
+
+Векторная таблица на этапе компиляции формируется с привязкой конкретных обработчиков к точкам входа. EXTI13 входит в группу EXTI15_10. В таблице:
+
+[source,cpp]
+----
+ButtonExti<modeManager>::HandleClick,     // EXTI15_10
+Timer<TIM5, modeManager>::OverloadHandler // TIM5
+----
+
+== Диаграмма последовательности (PlantUML)
+
+[plantuml, exti_sequence, svg]
+----
+@startuml
+hide footbox
+participant "GPIOC13"
+participant "EXTI13"
+participant "NVIC"
+participant "ButtonExti::HandleClick"
+participant "ModeManager"
+"GPIOC13" -> "EXTI13" : Нажатие кнопки
+"EXTI13" -> "NVIC" : Запрос прерывания
+"NVIC" -> "ButtonExti::HandleClick" : Вызов обработчика
+"ButtonExti::HandleClick" -> "ModeManager" : SwitchModeManager()
+@enduml
+----
+
+== Результат работы
+
+После загрузки прошивки светодиоды начинают работать в одном из режимов (например, AllMode). Нажатие кнопки переключает режим, а таймер каждые 500 мс обновляет состояние. Всё работает плавно и без задержек.
+
+== Почему EXTI
+
+Использование EXTI нам дало такие плюсы:
+
+* Быстродействие, реакция на кнопку моментальная.
+* Экономия ресурсов, процессор не тратит время на опрос пинов.
+* Гибкость, легко добавить новые события или режимы.
+
+== Заключение
+В этой лабораторной работе я настроил систему на STM32F411 для переключения режимов с помощью кнопки и таймера. Использовал NVIC для управления прерываниями и EXTI для обработки нажатий на PC13. Код написал в виде классов — ButtonExti, ModeManager, Timer, чтобы было удобно и понятно. 
+
+Кнопка через EXTI13 мгновенно переключает режимы, а TIM5 каждые 500 мс обновляет состояние, например, мигает светодиодами. Всё работает плавно, без тормозов. EXTI выбрал за быстроту и экономию ресурсов — процессор не висит на опросе пинов. 
+
+Прошивка делает что нужно: режимы меняются, светодиоды мигают. Код получился гибким, можно легко добавить что-то новое. Понял, как NVIC и EXTI работают вместе, и как писать аккуратный код для таких задач.
+
+== Исходные коды
+
+[source,cpp]
+----
+// Timer шаблон
+template<typename TIMRegs, auto &modeManager>
+class Timer {
+public:
+    static void OverloadHandler() {
+        if (TIMRegs::SR::UIF::InterruptPending::IsSet()) {
+            modeManager.UpdateModeManager();
+            TIMRegs::SR::UIF::Set(0);
+        }
+    }
+};
+----
+
+[source,cpp]
+----
+// ButtonExti шаблон
+template<auto &modeManager>
+class ButtonExti {
+public:
+    static void HandleClick() {
+        if (EXTI::PR::PR13::Value1::IsSet()) {
+            modeManager.SwitchModeManager();
+            EXTI::PR::PR13::Value1::Set();
+        }
+    }
+};
+----
+
+[source,cpp]
+----
+// Векторная таблица
+extern "C" const tIntVectItem __vector_table[] = {
+  ...
+  ButtonExti<modeManager>::HandleClick,     // EXTI Line 15..10
+  ...
+  Timer<TIM5, modeManager>::OverloadHandler, // TIM5 global interrupt
+  ...
+};
+----
+
+[source,cpp]
+----
+// Инициализация и main
+int __low_level_init(void) {
+    RCC::CR::HSION::On::Set();
+    RCC::CFGR::SW::Hsi::Set();
+    RCC::APB2ENR::SYSCFGEN::Enable::Set();
+    STK::CTRL::CLKSOURCE::CpuClock::Set();
+    RCC::APB1ENR::TIM5EN::Enable::Set();
+    RCC::AHB1ENR::GPIOAEN::Enable::Set();
+    RCC::AHB1ENR::GPIOCEN::Enable::Set();
+
+    GPIOA::MODER::MODER5::Output::Set();
+    GPIOC::MODER::MODER5::Output::Set();
+    GPIOC::MODER::MODER8::Output::Set();
+    GPIOC::MODER::MODER9::Output::Set();
+    GPIOC::MODER::MODER13::Input::Set();
+
+    SYSCFG::EXTICR4::EXTI13::Value2::Set();
+    EXTI::FTSR::TR13::Value1::Set();
+    EXTI::RTSR::TR13::Value0::Set();
+    EXTI::PR::PR13::Value1::Set();
+    NVIC::ISER1::Write(1 << 8U);   // EXTI15_10
+    NVIC::ISER1::Write(1 << 18U);  // TIM5
+
+    const auto TimerDivider = SystemCoreClock / 1'000U;
+    TIM5::PSC::Write(TimerDivider);
+    TIM5::CR1::URS::Value1::Set();
+    TIM5::ARR::Write(500U);
+    TIM5::SR::UIF::Set(0);
+    TIM5::CNT::Write(0);
+    TIM5::DIER::UIE::Value1::Set();
+
+    return 1;
+}
+
+int main() {
+    EXTI::IMR::MR13::Value1::Set();
+    TIM5::CR1::CEN::Enable::Set();
+    modeManager.InitModeManager();
+    for (;;) {}
+    return 1;
+}
+----
+
+
+
